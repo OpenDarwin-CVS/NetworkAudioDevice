@@ -78,8 +78,8 @@ extern "C" {
 #define ESD_NAME_LEN 128 
 
 #define SAMPLE_RATE         44100
-#define BLOCK_SIZE          1024
-#define NUM_BLOCKS          32
+#define BLOCK_SIZE          256
+#define NUM_BLOCKS          16
 #define NUM_CHANNELS        2
 #define BIT_DEPTH           16
 #define NUM_SAMPLE_FRAMES   (NUM_BLOCKS * BLOCK_SIZE)
@@ -96,6 +96,7 @@ static void _tcpSendThread (void* o)
     ((NetworkAudioEngine*)o)->tcpSendThread();
 }
 
+
 static IOReturn _takeTimeStamp (
     OSObject* o,
     void*, void*, void*, void*
@@ -107,7 +108,8 @@ static IOReturn _takeTimeStamp (
     return kIOReturnSuccess;
 }
 
-IOReturn handleSleep(
+
+IOReturn handleSleep (
 	void *target,
 	void *refCon,
 	UInt32 messageType,
@@ -134,6 +136,7 @@ IOReturn handleSleep(
   
     return kIOReturnSuccess;
 }
+
 
 OSDefineMetaClassAndStructors(NetworkAudioEngine, IOAudioEngine)
 
@@ -162,6 +165,7 @@ bool NetworkAudioEngine::init()
     return true;
 }
 
+
 bool NetworkAudioEngine::initHardware(IOService *provider)
 {
     IOAudioSampleRate initialSampleRate;
@@ -170,6 +174,16 @@ bool NetworkAudioEngine::initHardware(IOService *provider)
     IOAudioSampleRate rate;
 
     IOLog ("NetworkAudioEngine::initHardware(%X)\n", (unsigned) provider);
+    IOLog ("SAMPLE_RATE %d\n", SAMPLE_RATE);
+    IOLog ("BLOCK_SIZE %d\n", BLOCK_SIZE);
+    IOLog ("NUM_BLOCKS %d\n", NUM_BLOCKS);
+    IOLog ("NUM_CHANNELS %d\n", NUM_CHANNELS);
+    IOLog ("BIT_DEPTH %d\n", BIT_DEPTH);
+    IOLog ("NUM_SAMPLE_FRAMES %d\n", NUM_SAMPLE_FRAMES);
+    IOLog ("FRAME_BYTES %d\n", FRAME_BYTES);
+    IOLog ("BLOCK_BYTES %d\n", BLOCK_BYTES);
+    IOLog ("BUFFER_BYTES %d\n", BUFFER_BYTES);
+    IOLog ("NSEC_PER_BLOCK %d\n", NSEC_PER_BLOCK);
     
     if (!IOAudioEngine::initHardware(provider)) {
         return false;
@@ -180,7 +194,7 @@ bool NetworkAudioEngine::initHardware(IOService *provider)
     setSampleRate(&initialSampleRate);
     setDescription("Network Audio Driver");
     setNumSampleFramesPerBuffer(NUM_SAMPLE_FRAMES);
-    setSampleOffset(BLOCK_SIZE);
+//    setSampleOffset(BLOCK_SIZE);
 
     if (!(outputBuffer = (SInt16 *)IOMalloc(BUFFER_BYTES))) {
         return false;
@@ -269,6 +283,8 @@ IOReturn NetworkAudioEngine::performAudioEngineStart()
 
     takeTimeStamp(false);
     currentBlock = 0;
+    currentMixFrame = 0;
+    currentMixDelta = 0;
     engine_running = 1;
     thread = IOCreateThread (_tcpSendThread, this);
         // Start a thread to send data from the sample buffer
@@ -288,6 +304,7 @@ IOReturn NetworkAudioEngine::performAudioEngineStop()
     return kIOReturnSuccess;
 }
 
+
 void NetworkAudioEngine::performAudioEngineDisconnect()
 {
     IOLog ("NetworkAudioEngine::performAudioEngineDisconnect()\n");
@@ -304,6 +321,7 @@ UInt32 NetworkAudioEngine::getCurrentSampleFrame()
     return currentBlock * BLOCK_SIZE;
 }
 
+
 IOReturn NetworkAudioEngine::clipOutputSamples(
     const void *mixBuf,
     void *sampleBuf,
@@ -313,6 +331,14 @@ IOReturn NetworkAudioEngine::clipOutputSamples(
     IOAudioStream *audioStream
 ) {
     UInt32 i = firstSampleFrame * streamFormat->fNumChannels;
+
+//    static UInt32 size = 0;
+//    if (size != numSampleFrames) {
+//        IOLog ("cliping %d frames\n", (int)numSampleFrames);
+//    }
+//    size = numSampleFrames;
+
+    currentMixFrame = i;
     
     Float32ToNativeInt16(
         &(((const float *)mixBuf)[i]),
@@ -323,12 +349,13 @@ IOReturn NetworkAudioEngine::clipOutputSamples(
     return kIOReturnSuccess;
 }
 
+
 void NetworkAudioEngine::tcpSendThread (void) {
     int error;
     struct iovec iovec[6];
     struct uio uio;
     int newblock;
-    AbsoluteTime ticks;
+    AbsoluteTime ticks = {0,0};
     AbsoluteTime ticks_per_block;
     char key [] = "abababababababab";
     unsigned int endian =
@@ -337,6 +364,7 @@ void NetworkAudioEngine::tcpSendThread (void) {
     int format = ESD_BITS16 | ESD_STEREO | ESD_STREAM | ESD_PLAY;
     int rate = SAMPLE_RATE;
     char name[ESD_NAME_LEN];
+    int d, f;
 
     IOLog ("TCP Send thread started\n");
     IOLockLock(lock);
@@ -435,14 +463,25 @@ void NetworkAudioEngine::tcpSendThread (void) {
         // Update the block count
         newblock = currentBlock + 1;
         if (newblock >= NUM_BLOCKS) {
-            newblock = 0;
-        }
-        currentBlock = newblock;
-
-        // If we wrapped arround, tell the engine
-        if (newblock == 0) {
+            // If we wrapped arround, tell the engine
+            currentBlock = 0;
             doTakeTimeStamp->runCommand();
+        } else {
+            currentBlock = newblock;
         }
+
+        f = currentMixFrame;
+        d = ((f + ((BLOCK_SIZE * NUM_CHANNELS)/2)) / (BLOCK_SIZE * NUM_CHANNELS)) - newblock;
+        if (d < 0) {
+            d += NUM_BLOCKS;
+        }
+        if (d > 4) {
+            IOLog (
+                "newblock = %d, f = %d (/ BLOCK_SIZE = %d), d = %d\n",
+                newblock, f, f / (BLOCK_SIZE * NUM_CHANNELS), d
+            );
+        }
+        currentMixDelta = d;
 
         if  (!engine_running) {
             break;

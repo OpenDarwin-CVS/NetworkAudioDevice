@@ -72,6 +72,8 @@ public:
     UInt32 blockSize;
     UInt32 numBlocks;
     UInt32 currentBlock;
+    UInt32 currentMixFrame;
+    int currentMixDelta;
 
     IOCommandGate* doTakeTimeStamp;
 
