@@ -69,8 +69,6 @@ public:
     UInt32 outputBufferSize;
     void *outputBuffer;
     
-    UInt32 blockSize;
-    UInt32 numBlocks;
     UInt32 currentBlock;
 
     IOCommandGate* doTakeTimeStamp;

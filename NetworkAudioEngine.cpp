@@ -196,7 +196,8 @@ bool NetworkAudioEngine::initHardware(IOService *provider)
     setNumSampleFramesPerBuffer(NUM_SAMPLE_FRAMES);
 //    setSampleOffset(BLOCK_SIZE);
 
-    if (!(outputBuffer = (SInt16 *)IOMalloc(BUFFER_BYTES))) {
+    outputBufferSize = BUFFER_BYTES;
+    if (!(outputBuffer = (SInt16 *)IOMalloc(outputBufferSize))) {
         return false;
     }
     if (!(audioStream = new IOAudioStream)) {
