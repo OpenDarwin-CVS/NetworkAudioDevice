@@ -74,10 +74,13 @@ public:
     UInt32 currentBlock;
     UInt32 blockTimeoutUS;
 
-    IOCommandGate* commandGate;
+    IOCommandGate* doTakeTimeStamp;
 
+    IONotifier* sleep_callback;
+    UInt32 disconnect;
     UInt32 engine_running;
     
+    IOLock* lock;
     struct socket* sock;
     struct sockaddr_in sockaddr;
 
@@ -93,22 +96,19 @@ public:
     virtual UInt32 getCurrentSampleFrame();
     
     virtual IOReturn clipOutputSamples(
-        const void *mixBuf,
+        void *mixBuf,
         void *sampleBuf,
         UInt32 firstSampleFrame,
         UInt32 numSampleFrames,
         const IOAudioStreamFormat *streamFormat,
         IOAudioStream *audioStream
     );
-    
-    virtual IOReturn esoundConnect(void);
-    
-    static IOReturn doTimeStamp
-        (NetworkAudioEngine *audioEngine, void*, void*, void*, void*);
 
-    static void NetworkAudioEngine::tcpSendThread
-        (NetworkAudioEngine *audioEngine);
-
+    void performAudioEngineDisconnect();
+    
+    void esoundConnect(void);
+    void doTimeStamp (void);
+    void tcpSendThread (void);
 };
 
 #endif /* _NETWORKAUDIOENGINE_H */

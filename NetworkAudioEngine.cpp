@@ -50,6 +50,8 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOCommandGate.h>
+#include <IOKit/IOMessage.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
 
 extern "C" {
 #include <sys/socketvar.h>
@@ -67,6 +69,14 @@ extern "C" {
 #define ESD_HOST 0x0A000167 // 10.0.1.103
 #define ESD_PORT 16001
 
+// See: http://cvs.gnome.org/lxr/source/esound/esd.h
+#define ESD_PROTO_STREAM_PLAY 0x03
+#define ESD_BITS16 0x0001
+#define ESD_STEREO 0x0020
+#define ESD_STREAM 0x0000
+#define ESD_PLAY   0x1000
+#define ESD_NAME_LEN 128 
+
 #define SAMPLE_RATE         44100
 #define BLOCK_SIZE          1024
 #define NUM_BLOCKS          32
@@ -77,16 +87,67 @@ extern "C" {
 #define BLOCK_BYTES         (BLOCK_SIZE * FRAME_BYTES)
 #define BUFFER_BYTES        (NUM_BLOCKS * BLOCK_BYTES)
 
+static unsigned int wait_timeout_event;
+
+
+static void _tcpSendThread (void* o)
+{
+    ((NetworkAudioEngine*)o)->tcpSendThread();
+}
+
+static IOReturn _takeTimeStamp (
+    OSObject* o,
+    void*, void*, void*, void*
+) {
+    NetworkAudioEngine* ae = OSDynamicCast(NetworkAudioEngine, o);
+    if (ae) {
+        ae->takeTimeStamp();
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn handleSleep(
+	void *target,
+	void *refCon,
+	UInt32 messageType,
+	IOService *service,
+    	void *messageArgument,
+	vm_size_t argSize
+) {
+    sleepWakeNote *swNote = (sleepWakeNote *)messageArgument;
+
+    switch (messageType) {
+        case kIOMessageSystemWillSleep:
+            IOLog ("about to sleep\n");
+            ((NetworkAudioEngine*)target)->performAudioEngineDisconnect();
+            break;
+        case kIOMessageSystemHasPoweredOn:
+            IOLog ("just woke up\n");
+            break;
+        default:
+            return kIOReturnUnsupported;
+    }
+
+    swNote->returnValue = 0;
+    acknowledgeSleepWakeNotification(swNote->powerRef);
+  
+    return kIOReturnSuccess;
+}
+
 OSDefineMetaClassAndStructors(NetworkAudioEngine, IOAudioEngine)
 
 
 bool NetworkAudioEngine::init()
 {
+    IOLog ("NetworkAudioEngine::init()\n");
+
     if (!IOAudioEngine::init(NULL)) {
         return false;
     }
 
+    lock = IOLockAlloc();
     sock = NULL;
+    disconnect = 0;
 
     memset (&sockaddr, 0, sizeof (sockaddr));
     sockaddr.sin_len = sizeof (sockaddr);
@@ -95,9 +156,10 @@ bool NetworkAudioEngine::init()
     sockaddr.sin_addr.s_addr = htonl (ESD_HOST);
         // FIXME load the address and port form somewhere sensible.
 
+    sleep_callback = registerSleepWakeInterest(&handleSleep, this);
+
     return true;
 }
-
 
 bool NetworkAudioEngine::initHardware(IOService *provider)
 {
@@ -105,6 +167,8 @@ bool NetworkAudioEngine::initHardware(IOService *provider)
     IOWorkLoop *wl;
     IOAudioStream *audioStream;
     IOAudioSampleRate rate;
+
+    IOLog ("NetworkAudioEngine::initHardware(%X)\n", (unsigned) provider);
     
     if (!IOAudioEngine::initHardware(provider)) {
         return false;
@@ -154,15 +218,11 @@ bool NetworkAudioEngine::initHardware(IOService *provider)
         return false;
     }
      
-    // command gate used by tcpSendThread to signal buffer wrap-around.
-    commandGate = IOCommandGate::commandGate(
-        this,
-        (IOReturn(*)(OSObject*, void*, void*, void*, void*))doTimeStamp
-    );
-    if (!commandGate) {
+    doTakeTimeStamp = IOCommandGate::commandGate(this, _takeTimeStamp);
+    if (!doTakeTimeStamp) {
         return false;
     }
-    workLoop->addEventSource(commandGate);
+    workLoop->addEventSource(doTakeTimeStamp);
 
     return true;
 }
@@ -170,6 +230,16 @@ bool NetworkAudioEngine::initHardware(IOService *provider)
 
 void NetworkAudioEngine::free()
 {
+    IOLog ("NetworkAudioEngine::free()\n");
+
+    sleep_callback->remove();
+
+    disconnect = 1;
+    engine_running = 0; // Causes tcpSendThread to exit
+    IOLockLock(lock);
+    IOLockUnlock(lock);
+    IOLockFree(lock);
+
     if (outputBuffer != NULL) {
         IOFree(outputBuffer, outputBufferSize);
         outputBuffer = NULL;
@@ -181,110 +251,27 @@ void NetworkAudioEngine::free()
  
 void NetworkAudioEngine::stop(IOService *provider)
 {
-    int error;
-    int fstate;
-    
-    if (sock) {
-        fstate = thread_funnel_set (network_flock, TRUE);
-        soshutdown (sock, 2);
-        error = soclose (sock);
-        thread_funnel_set (network_flock, fstate);
-        sock = NULL;
-    }
+    IOLog ("NetworkAudioEngine::stop(%X)\n", (unsigned) provider);
+
+    disconnect = 1;
+    engine_running = 0; // Causes tcpSendThread to exit
+    IOLockLock(lock);
+    IOLockUnlock(lock);
 
     IOAudioEngine::stop(provider);
-}
-
-// See: http://cvs.gnome.org/lxr/source/esound/esd.h
-#define ESD_PROTO_STREAM_PLAY 0x03
-#define ESD_BITS16 0x0001
-#define ESD_STEREO 0x0020
-#define ESD_STREAM 0x0000
-#define ESD_PLAY   0x1000
-#define ESD_NAME_LEN 128 
-
-IOReturn NetworkAudioEngine::esoundConnect()
-{
-    int error;
-    int fstate;
-    struct iovec iovec[6];
-    struct uio uio;
-    char key [] = "abababababababab";
-    unsigned int endian =
-        (unsigned int)(('E' << 24) + ('N' << 16) + ('D' << 8) + ('N'));
-    int proto = ESD_PROTO_STREAM_PLAY;
-    int format = ESD_BITS16 | ESD_STEREO | ESD_STREAM | ESD_PLAY;
-    int rate = SAMPLE_RATE;
-    char name[ESD_NAME_LEN];
-
-    fstate = thread_funnel_set (network_flock, TRUE);
-
-    error = socreate (AF_INET, &sock, SOCK_STREAM, IPPROTO_TCP);
-    if (error) {
-        thread_funnel_set (network_flock, fstate);
-        return kIOReturnError;
-    }
-
-    // Connect to the esound daemon
-
-    error = soconnect (sock, (struct sockaddr*) &sockaddr);
-    if (error) {
-        IOLog ("socconnect returned %d\n", error);
-        soclose (sock);
-        thread_funnel_set (network_flock, fstate);
-        sock = NULL;
-        return kIOReturnError;
-    }
-
-    // Prepare an ESD header: key, endian, proto, format, rate, name
-
-    strcpy (name, "mac");
-    iovec[0].iov_base = (char*) key;
-    iovec[0].iov_len = strlen (key);
-    iovec[1].iov_base = (char*) &endian;
-    iovec[1].iov_len = sizeof (endian);
-    iovec[2].iov_base = (char*) &proto;
-    iovec[2].iov_len = sizeof (proto);
-    iovec[3].iov_base = (char*) &format;
-    iovec[3].iov_len = sizeof (format);
-    iovec[4].iov_base = (char*) &rate;
-    iovec[4].iov_len = sizeof (rate);
-    iovec[5].iov_base = (char*) name;
-    iovec[5].iov_len = ESD_NAME_LEN;
-
-    uio.uio_iov = iovec;
-    uio.uio_iovcnt = 6;
-    uio.uio_offset = 0;
-    uio.uio_resid = 0;
-    for (int i = 0 ; i < uio.uio_iovcnt ; i++) {
-        uio.uio_resid += iovec[i].iov_len;
-    }
-    uio.uio_segflg = UIO_SYSSPACE;
-    uio.uio_rw = UIO_WRITE;
-    uio.uio_procp = NULL;
-
-    // Wait for the socket to settle down after creation
-    sbwait((sockbuf*)&(sock->so_snd));
-
-    // Send the ESD header
-    error = sosend (sock, NULL, &uio, NULL, NULL, 0);
-    if (error) {
-        IOLog ("sosend (header) returned %d\n", error);
-        soclose (sock);
-        sock = NULL;
-    }
-    thread_funnel_set (network_flock, fstate);
-
-    return sock ? kIOReturnSuccess : kIOReturnError;
 }
 
  
 IOReturn NetworkAudioEngine::performAudioEngineStart()
 {
+    IOThread thread;   
+
+    IOLog ("NetworkAudioEngine::performAudioEngineStart()\n");
+
     takeTimeStamp(false);
     currentBlock = 0;
     engine_running = 1;
-    IOCreateThread ((void(*)(void*))tcpSendThread, this);
+    thread = IOCreateThread (_tcpSendThread, this);
         // Start a thread to send data from the sample buffer
 
     return kIOReturnSuccess;
@@ -293,21 +280,33 @@ IOReturn NetworkAudioEngine::performAudioEngineStart()
  
 IOReturn NetworkAudioEngine::performAudioEngineStop()
 {
-    engine_running = 1; // Causes tcpSendThread to exit
+    IOLog ("NetworkAudioEngine::performAudioEngineStop()\n");
+
+    engine_running = 0; // Causes tcpSendThread to exit
+    IOLockLock(lock);
+    IOLockUnlock(lock);
 
     return kIOReturnSuccess;
+}
+
+void NetworkAudioEngine::performAudioEngineDisconnect()
+{
+    IOLog ("NetworkAudioEngine::performAudioEngineDisconnect()\n");
+
+    disconnect = 1;
+    performAudioEngineStop();
 }
 
  
 UInt32 NetworkAudioEngine::getCurrentSampleFrame()
 {
+//    IOLog ("NetworkAudioEngine::getCurrentSampleFrame()\n");
+
     return currentBlock * BLOCK_SIZE;
-        // FIXME Does this need mutex protection from reading while
-        //  being updated by tcpSendThread ?
 }
 
 IOReturn NetworkAudioEngine::clipOutputSamples(
-    const void *mixBuf,
+    void *mixBuf,
     void *sampleBuf,
     UInt32 firstSampleFrame,
     UInt32 numSampleFrames,
@@ -325,89 +324,150 @@ IOReturn NetworkAudioEngine::clipOutputSamples(
     return kIOReturnSuccess;
 }
 
-IOReturn NetworkAudioEngine::doTimeStamp (
-    NetworkAudioEngine *audioEngine,
-    void*, void*, void*, void*
-) {
-    audioEngine->takeTimeStamp();
-
-    return kIOReturnSuccess;
-}
-
-static unsigned int wait_timeout_event;
-
-void NetworkAudioEngine::tcpSendThread (NetworkAudioEngine *audioEngine)
-{
+void NetworkAudioEngine::tcpSendThread (void) {
     int error;
     int fstate;
-    struct iovec iovec;
+    struct iovec iovec[6];
     struct uio uio;
     int newblock;
     AbsoluteTime ts, t;
     uint64_t uts, ut;
+    char key [] = "abababababababab";
+    unsigned int endian =
+        (unsigned int)(('E' << 24) + ('N' << 16) + ('D' << 8) + ('N'));
+    int proto = ESD_PROTO_STREAM_PLAY;
+    int format = ESD_BITS16 | ESD_STEREO | ESD_STREAM | ESD_PLAY;
+    int rate = SAMPLE_RATE;
+    char name[ESD_NAME_LEN];
 
-    uio.uio_iov = &iovec;
-    uio.uio_iovcnt = 1;
-    uio.uio_offset = 0;
-    uio.uio_segflg = UIO_SYSSPACE;
-    uio.uio_rw = UIO_WRITE;
-    uio.uio_procp = NULL;
+    IOLog ("TCP Send thread started\n");
+    IOLockLock(lock);
 
-    while (audioEngine->engine_running) {
+    while (engine_running) {
         clock_get_uptime(&ts);
 
         // Try to connect to the server if needed
-        if (audioEngine->sock == NULL) {
+        if (sock == NULL) {
             IOLog ("Connecting to esound server...\n");
-            audioEngine->esoundConnect();
-        }
-
-        // If connected send a block
-        if (audioEngine->sock != NULL) {
-            iovec.iov_base =
-                (char*) audioEngine->outputBuffer
-                + (audioEngine->currentBlock * BLOCK_BYTES);
-            iovec.iov_len = BLOCK_BYTES;
-            uio.uio_resid = iovec.iov_len;
-            uio.uio_iovcnt = 1;
-            uio.uio_offset = 0;
-
             fstate = thread_funnel_set (network_flock, TRUE);
-            error = sosend (audioEngine->sock, NULL, &uio, NULL, NULL, 0);
+
+            error = socreate (AF_INET, &sock, SOCK_STREAM, IPPROTO_TCP);
             if (error) {
-                IOLog ("sosend (data) returned %d\n", error);
-                soshutdown (audioEngine->sock, 2);
-                soclose (audioEngine->sock);
-                audioEngine->sock = NULL;
+                IOLog ("socreate failed!\n");
+            } else {
+                // Connect to the esound daemon
+                error = soconnect (sock, (struct sockaddr*) &sockaddr);
+                if (error) {
+                    IOLog ("socconnect returned %d\n", error);
+                    soclose (sock);
+                    sock = NULL;
+                } else {
+                    // Prepare an ESD header: key, endian, proto, format, rate, name
+
+                    strcpy (name, "mac");
+                    iovec[0].iov_base = (char*) key;
+                    iovec[0].iov_len = strlen (key);
+                    iovec[1].iov_base = (char*) &endian;
+                    iovec[1].iov_len = sizeof (endian);
+                    iovec[2].iov_base = (char*) &proto;
+                    iovec[2].iov_len = sizeof (proto);
+                    iovec[3].iov_base = (char*) &format;
+                    iovec[3].iov_len = sizeof (format);
+                    iovec[4].iov_base = (char*) &rate;
+                    iovec[4].iov_len = sizeof (rate);
+                    iovec[5].iov_base = (char*) name;
+                    iovec[5].iov_len = ESD_NAME_LEN;
+
+                    uio.uio_iov = iovec;
+                    uio.uio_iovcnt = 6;
+                    uio.uio_offset = 0;
+                    uio.uio_resid = 0;
+                    for (int i = 0 ; i < uio.uio_iovcnt ; i++) {
+                        uio.uio_resid += iovec[i].iov_len;
+                    }
+                    uio.uio_segflg = UIO_SYSSPACE;
+                    uio.uio_rw = UIO_WRITE;
+                    uio.uio_procp = NULL;
+
+                    // Wait for the socket to settle down after creation
+                    sbwait((sockbuf*)&(sock->so_snd));
+
+                    // Send the ESD header
+                    error = sosend (sock, NULL, &uio, NULL, NULL, 0);
+                    if (error) {
+                        IOLog ("sosend (header) returned %d\n", error);
+                        soclose (sock);
+                        sock = NULL;
+                    }
+                }
             }
             thread_funnel_set (network_flock, fstate);
         }
 
+        // If connected send a block
+        if (sock != NULL) {
+            iovec[0].iov_base =
+                (char*) outputBuffer
+                + (currentBlock * BLOCK_BYTES);
+            iovec[0].iov_len = BLOCK_BYTES;
+            uio.uio_iov = iovec;
+            uio.uio_resid = iovec[0].iov_len;
+            uio.uio_iovcnt = 1;
+            uio.uio_offset = 0;
+            uio.uio_segflg = UIO_SYSSPACE;
+            uio.uio_rw = UIO_WRITE;
+            uio.uio_procp = NULL;
+
+            fstate = thread_funnel_set (network_flock, TRUE);
+            error = sosend (sock, NULL, &uio, NULL, NULL, 0);
+            if (error) {
+                IOLog ("sosend (data) returned %d\n", error);
+                soshutdown (sock, 2);
+                soclose (sock);
+                sock = NULL;
+            }
+            thread_funnel_set (network_flock, fstate);
+        } else {
+            IOLog ("no socket!\n");
+        }
+
+        // Update the block count
+        newblock = currentBlock + 1;
+        if (newblock >= NUM_BLOCKS) {
+            newblock = 0;
+        }
+        currentBlock = newblock;
+
+        // If we wrapped arround, tell the engine
+        if (newblock == 0) {
+            doTakeTimeStamp->runCommand();
+        }
+
+        if  (!engine_running) {
+            break;
+        }
         // Go to sleep until the next block is ready.
         clock_get_uptime(&t);
         absolutetime_to_nanoseconds(ts, &uts);
         absolutetime_to_nanoseconds(t, &ut);
         assert_wait((event_t)&wait_timeout_event, THREAD_UNINT);
         thread_set_timer(
-            (int)audioEngine->blockTimeoutUS - ((int)((ut - uts) / 1000)),
+            (int)blockTimeoutUS - ((int)((ut - uts) / 1000)),
             NSEC_PER_USEC
         );
         thread_block(THREAD_CONTINUE_NULL);
-
-        // Update the block count
-        newblock = audioEngine->currentBlock + 1;
-        if (newblock >= NUM_BLOCKS) {
-            newblock = 0;
-        }
-        audioEngine->currentBlock = newblock;
-
-        // If we wrapped arround, tell the engine
-        if (newblock == 0) {
-            audioEngine->commandGate->runCommand();
-                // calls audioEngine->takeTimeStamp();
-        }
     }
+    if  (disconnect) {
+        fstate = thread_funnel_set (network_flock, TRUE);
+        soshutdown (sock, 2);
+        soclose (sock);
+        thread_funnel_set (network_flock, fstate);
+        sock = NULL;
+    }
+    IOLog ("TCP Send thread exiting...\n");
+    IOLockUnlock(lock);
     IOExitThread();
+    IOLog ("!!This message shold never appear!!\n");
 }
 
 
