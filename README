@@ -1,5 +1,5 @@
 ================================================================================
- $Id$ 
+ $Id$
 ================================================================================
 
  Network Audio Driver for Darwin (Mac OS X)
@@ -7,14 +7,14 @@
  Copyright Sam O'Connor <samoconnor@mac.com>
 
  Implements an IOAudioDevice with a single output stream that sends
- aduio to an esound (esd) server.
+ audio to an esound (esd) server.
 
 
 ABOUT
 
  The intention of this driver is to take all the audio output from one computer
  (eg an iBook with an airport card) and send it to another computer (eg an old
- Linux box hooked up to a stereo). This makes it easy to listent to music,
+ Linux box hooked up to a stereo). This makes it easy to listen to music,
  watch movies etc on the laptop while utilising the nice speakers hooked up to
  the stereo.
 
@@ -39,7 +39,7 @@ WARNING
  THIS IS A KERNEL DRIVER, IT HAS ONLY HAD LIMITED TESTING
  IT MAY CRASH YOUR MAC AND YOU MAY LOOSE ALL YOUR DATA
 
- You have been warned. During development I hav crashed my iBook dozens of
+ You have been warned. During development I have crashed my iBook dozens of
  times but have not actually lost any data thanks to having journalling
  turned on (and luck).
 
@@ -58,7 +58,7 @@ USAGE
  (or build with project builder and use kextload to load the kext.)
 
  then select "Network Audio Driver" as sound output device in the "Sound"
- system preferences panel. You will either get sound comming from your
+ system preferences panel. You will either get sound coming from your
  esound server, messages in /var/log/system.log or a hard crash.
 
 
@@ -69,7 +69,7 @@ THANKS
 
  Justin Walker
  Godfrey van der Linden
- Bernd Lohr 
+ Bernd Lohr
  Brian Bergstrand
  Joakim Arfvidsson
 
