@@ -19,6 +19,21 @@ ABOUT
  the stereo.
 
 
+SOURCE
+
+ Source is available from opendarwin.org CVS:
+
+ cvs -d :pserver:anonymous@anoncvs.opendarwin.org:/Volumes/src/cvs/od login
+ <just press return for the password>
+ cvs -z3 -d :pserver:anonymous@anoncvs.opendarwin.org:/Volumes/src/cvs/od \
+     co proj/NetworkAudioDevice
+
+ More info: http://www.opendarwin.org/doc/en/articles/opendarwin/cvs_howto/
+
+ or browse with cvsweb:
+     http://www.opendarwin.org/cgi-bin/cvsweb.cgi/proj/NetworkAudioDevice/
+
+
 WARNING
 
  THIS IS A KERNEL DRIVER, IT HAS ONLY HAD LIMITED TESTING
