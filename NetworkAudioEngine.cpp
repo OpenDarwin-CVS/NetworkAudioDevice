@@ -283,8 +283,6 @@ IOReturn NetworkAudioEngine::performAudioEngineStart()
 
     takeTimeStamp(false);
     currentBlock = 0;
-    currentMixFrame = 0;
-    currentMixDelta = 0;
     engine_running = 1;
     thread = IOCreateThread (_tcpSendThread, this);
         // Start a thread to send data from the sample buffer
@@ -332,14 +330,6 @@ IOReturn NetworkAudioEngine::clipOutputSamples(
 ) {
     UInt32 i = firstSampleFrame * streamFormat->fNumChannels;
 
-//    static UInt32 size = 0;
-//    if (size != numSampleFrames) {
-//        IOLog ("cliping %d frames\n", (int)numSampleFrames);
-//    }
-//    size = numSampleFrames;
-
-    currentMixFrame = i;
-    
     Float32ToNativeInt16(
         &(((const float *)mixBuf)[i]),
         &(((int16_t *)sampleBuf)[i]),
@@ -354,7 +344,6 @@ void NetworkAudioEngine::tcpSendThread (void) {
     int error;
     struct iovec iovec[6];
     struct uio uio;
-    int newblock;
     AbsoluteTime ticks = {0,0};
     AbsoluteTime ticks_per_block;
     char key [] = "abababababababab";
@@ -364,7 +353,6 @@ void NetworkAudioEngine::tcpSendThread (void) {
     int format = ESD_BITS16 | ESD_STEREO | ESD_STREAM | ESD_PLAY;
     int rate = SAMPLE_RATE;
     char name[ESD_NAME_LEN];
-    int d, f;
 
     IOLog ("TCP Send thread started\n");
     IOLockLock(lock);
@@ -374,11 +362,11 @@ void NetworkAudioEngine::tcpSendThread (void) {
     clock_get_uptime(&ticks);
 
     while (engine_running) {
+        thread_funnel_set (network_flock, TRUE);
 
         // Try to connect to the server if needed
         if (sock == NULL) {
             IOLog ("Connecting to esound server...\n");
-            thread_funnel_set (network_flock, TRUE);
 
             error = socreate (AF_INET, &sock, SOCK_STREAM, IPPROTO_TCP);
             if (error) {
@@ -430,7 +418,6 @@ void NetworkAudioEngine::tcpSendThread (void) {
                     }
                 }
             }
-            thread_funnel_set (network_flock, FALSE);
         }
 
         // If connected send a block
@@ -447,7 +434,6 @@ void NetworkAudioEngine::tcpSendThread (void) {
             uio.uio_rw = UIO_WRITE;
             uio.uio_procp = NULL;
 
-            thread_funnel_set (network_flock, TRUE);
             error = sosend (sock, NULL, &uio, NULL, NULL, 0);
             if (error) {
                 IOLog ("sosend (data) returned %d\n", error);
@@ -455,42 +441,28 @@ void NetworkAudioEngine::tcpSendThread (void) {
                 soclose (sock);
                 sock = NULL;
             }
-            thread_funnel_set (network_flock, FALSE);
         } else {
             IOLog ("no socket!\n");
         }
 
+        thread_funnel_set (network_flock, FALSE);
+
         // Update the block count
-        newblock = currentBlock + 1;
-        if (newblock >= NUM_BLOCKS) {
+        if (currentBlock == NUM_BLOCKS-1) {
             // If we wrapped arround, tell the engine
             currentBlock = 0;
             doTakeTimeStamp->runCommand();
         } else {
-            currentBlock = newblock;
+            currentBlock++;
         }
 
-        f = currentMixFrame;
-        d = ((f + ((BLOCK_SIZE * NUM_CHANNELS)/2)) / (BLOCK_SIZE * NUM_CHANNELS)) - newblock;
-        if (d < 0) {
-            d += NUM_BLOCKS;
+        if  (engine_running) {
+            // Go to sleep until the next block is ready.
+            ADD_ABSOLUTETIME(&ticks, &ticks_per_block);
+            assert_wait((event_t)&wait_timeout_event, THREAD_UNINT);
+            thread_set_timer_deadline (ticks);
+            thread_block(THREAD_CONTINUE_NULL);
         }
-        if (d > 4) {
-            IOLog (
-                "newblock = %d, f = %d (/ BLOCK_SIZE = %d), d = %d\n",
-                newblock, f, f / (BLOCK_SIZE * NUM_CHANNELS), d
-            );
-        }
-        currentMixDelta = d;
-
-        if  (!engine_running) {
-            break;
-        }
-        // Go to sleep until the next block is ready.
-        ADD_ABSOLUTETIME(&ticks, &ticks_per_block);
-        assert_wait((event_t)&wait_timeout_event, THREAD_UNINT);
-        thread_set_timer_deadline (ticks);
-        thread_block(THREAD_CONTINUE_NULL);
     }
     if  (disconnect) {
         thread_funnel_set (network_flock, TRUE);
