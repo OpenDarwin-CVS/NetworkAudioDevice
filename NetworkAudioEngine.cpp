@@ -86,6 +86,7 @@ extern "C" {
 #define FRAME_BYTES         (NUM_CHANNELS * BIT_DEPTH / 8)
 #define BLOCK_BYTES         (BLOCK_SIZE * FRAME_BYTES)
 #define BUFFER_BYTES        (NUM_BLOCKS * BLOCK_BYTES)
+#define NSEC_PER_BLOCK      ((1000000000 / SAMPLE_RATE) * BLOCK_SIZE)
 
 static unsigned int wait_timeout_event;
 
@@ -212,8 +213,6 @@ bool NetworkAudioEngine::initHardware(IOService *provider)
     addAudioStream(audioStream);
     audioStream->release();
 
-    blockTimeoutUS = 1000000 * BLOCK_SIZE / initialSampleRate.whole;
-    
     if (!(wl = getWorkLoop())) {
         return false;
     }
@@ -306,7 +305,7 @@ UInt32 NetworkAudioEngine::getCurrentSampleFrame()
 }
 
 IOReturn NetworkAudioEngine::clipOutputSamples(
-    void *mixBuf,
+    const void *mixBuf,
     void *sampleBuf,
     UInt32 firstSampleFrame,
     UInt32 numSampleFrames,
@@ -316,7 +315,7 @@ IOReturn NetworkAudioEngine::clipOutputSamples(
     UInt32 i = firstSampleFrame * streamFormat->fNumChannels;
     
     Float32ToNativeInt16(
-        &(((float *)mixBuf)[i]),
+        &(((const float *)mixBuf)[i]),
         &(((int16_t *)sampleBuf)[i]),
         numSampleFrames * streamFormat->fNumChannels
     );
@@ -326,12 +325,11 @@ IOReturn NetworkAudioEngine::clipOutputSamples(
 
 void NetworkAudioEngine::tcpSendThread (void) {
     int error;
-    int fstate;
     struct iovec iovec[6];
     struct uio uio;
     int newblock;
-    AbsoluteTime ts, t;
-    uint64_t uts, ut;
+    AbsoluteTime ticks;
+    AbsoluteTime ticks_per_block;
     char key [] = "abababababababab";
     unsigned int endian =
         (unsigned int)(('E' << 24) + ('N' << 16) + ('D' << 8) + ('N'));
@@ -343,13 +341,16 @@ void NetworkAudioEngine::tcpSendThread (void) {
     IOLog ("TCP Send thread started\n");
     IOLockLock(lock);
 
+    nanoseconds_to_absolutetime(NSEC_PER_BLOCK, &ticks_per_block);   
+
+    clock_get_uptime(&ticks);
+
     while (engine_running) {
-        clock_get_uptime(&ts);
 
         // Try to connect to the server if needed
         if (sock == NULL) {
             IOLog ("Connecting to esound server...\n");
-            fstate = thread_funnel_set (network_flock, TRUE);
+            thread_funnel_set (network_flock, TRUE);
 
             error = socreate (AF_INET, &sock, SOCK_STREAM, IPPROTO_TCP);
             if (error) {
@@ -401,7 +402,7 @@ void NetworkAudioEngine::tcpSendThread (void) {
                     }
                 }
             }
-            thread_funnel_set (network_flock, fstate);
+            thread_funnel_set (network_flock, FALSE);
         }
 
         // If connected send a block
@@ -418,7 +419,7 @@ void NetworkAudioEngine::tcpSendThread (void) {
             uio.uio_rw = UIO_WRITE;
             uio.uio_procp = NULL;
 
-            fstate = thread_funnel_set (network_flock, TRUE);
+            thread_funnel_set (network_flock, TRUE);
             error = sosend (sock, NULL, &uio, NULL, NULL, 0);
             if (error) {
                 IOLog ("sosend (data) returned %d\n", error);
@@ -426,7 +427,7 @@ void NetworkAudioEngine::tcpSendThread (void) {
                 soclose (sock);
                 sock = NULL;
             }
-            thread_funnel_set (network_flock, fstate);
+            thread_funnel_set (network_flock, FALSE);
         } else {
             IOLog ("no socket!\n");
         }
@@ -447,21 +448,16 @@ void NetworkAudioEngine::tcpSendThread (void) {
             break;
         }
         // Go to sleep until the next block is ready.
-        clock_get_uptime(&t);
-        absolutetime_to_nanoseconds(ts, &uts);
-        absolutetime_to_nanoseconds(t, &ut);
+        ADD_ABSOLUTETIME(&ticks, &ticks_per_block);
         assert_wait((event_t)&wait_timeout_event, THREAD_UNINT);
-        thread_set_timer(
-            (int)blockTimeoutUS - ((int)((ut - uts) / 1000)),
-            NSEC_PER_USEC
-        );
+        thread_set_timer_deadline (ticks);
         thread_block(THREAD_CONTINUE_NULL);
     }
     if  (disconnect) {
-        fstate = thread_funnel_set (network_flock, TRUE);
+        thread_funnel_set (network_flock, TRUE);
         soshutdown (sock, 2);
         soclose (sock);
-        thread_funnel_set (network_flock, fstate);
+        thread_funnel_set (network_flock, FALSE);
         sock = NULL;
     }
     IOLog ("TCP Send thread exiting...\n");

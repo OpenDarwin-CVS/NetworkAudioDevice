@@ -13,7 +13,7 @@
 extern "C" {
 #endif
 
-void Float32ToNativeInt16( float *src, signed short *dst, unsigned int count );
+void Float32ToNativeInt16(const float *src, signed short *dst, unsigned int count);
 
 #ifdef __cplusplus
 };

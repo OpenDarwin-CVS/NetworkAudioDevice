@@ -18,7 +18,7 @@ static inline double __fctiw( register double B )
 	return result;
 }
 
-void Float32ToNativeInt16( float *src, signed short *dst, unsigned int count )
+void Float32ToNativeInt16(const float *src, signed short *dst, unsigned int count)
 {
 	register double		scale = 2147483648.0;
 	register double		round = 32768.0;

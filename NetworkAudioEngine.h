@@ -72,7 +72,6 @@ public:
     UInt32 blockSize;
     UInt32 numBlocks;
     UInt32 currentBlock;
-    UInt32 blockTimeoutUS;
 
     IOCommandGate* doTakeTimeStamp;
 
@@ -96,7 +95,7 @@ public:
     virtual UInt32 getCurrentSampleFrame();
     
     virtual IOReturn clipOutputSamples(
-        void *mixBuf,
+        const void *mixBuf,
         void *sampleBuf,
         UInt32 firstSampleFrame,
         UInt32 numSampleFrames,
