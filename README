@@ -1,0 +1,112 @@
+================================================================================
+ $Id$ 
+================================================================================
+
+ Network Audio Driver for Darwin (Mac OS X)
+
+ Copyright Sam O'Connor <samoconnor@mac.com>
+
+ Implements an IOAudioDevice with a single output stream that sends
+ aduio to an esound (esd) server.
+
+
+ABOUT
+
+ The intention of this driver is to take all the audio output from one computer
+ (eg an iBook with an airport card) and send it to another computer (eg an old
+ Linux box hooked up to a stereo). This makes it easy to listent to music,
+ watch movies etc on the laptop while utilising the nice speakers hooked up to
+ the stereo.
+
+
+WARNING
+
+ THIS IS A KERNEL DRIVER, IT HAS ONLY HAD LIMITED TESTING
+ IT MAY CRASH YOUR MAC AND YOU MAY LOOSE ALL YOUR DATA
+
+ You have been warned. During development I hav crashed my iBook dozens of
+ times but have not actually lost any data thanks to having journalling
+ turned on (and luck).
+
+
+USAGE
+
+ Currently, the address of the esound server is hard-coded in
+ NetworkAudioEngine.cpp (look for ESD_HOST)
+
+ To install do:
+
+ make install
+
+ make load
+
+ (or build with project builder and use kextload to load the kext.)
+
+ then select "Network Audio Driver" as sound output device in the "Sound"
+ system preferences panel. You will either get sound comming from your
+ esound server, messages in /var/log/system.log or a hard crash.
+
+
+THANKS
+
+ Thanks to all those who showed interest and provided invaluable advice
+ on the darwin-drivers mailing list. In particular,
+
+ Justin Walker
+ Godfrey van der Linden
+ Bernd Lohr 
+ Brian Bergstrand
+ Joakim Arfvidsson
+
+
+MORE INFO
+
+ http://www.tux.org/~ricdude/EsounD.html
+    - Esound home page (a lot out of date)
+
+ http://cvs.gnome.org/lxr/source/esound/
+    - Esound source over at Gnome
+
+ http://asd.sourceforge.net/
+    - Lennart Poettering's esound replacement
+
+ http://fink.sourceforge.net/pdb/package.php/esound
+    - I run the esound server on a Linux box, but if you have another
+      mac you can use this Fink package to run esound.
+
+ http://www.opendarwin.org/cgi-bin/cvsweb.cgi/src/IOAudioFamily/Examples/PhantomAudioDriver/
+    - Example audio driver from Apple, used as a starting point.
+
+
+LEGAL
+
+ Copyright Sam O'Connor <samoconnor@mac.com>
+
+ Redistribution and use in source and binary forms, with or without
+ modification, are permitted provided that the following conditions are met:
+
+ Redistributions of source code must retain the above copyright notice, this
+ list of conditions and the following disclaimer.
+
+ Redistributions in binary form must reproduce the above copyright notice,
+ this list of conditions and the following disclaimer in the documentation
+ and/or other materials provided with the distribution.
+
+ The name of the author may not be used to endorse or promote products derived
+ from this software without specific prior written permission.
+
+ THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR IMPLIED
+ WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
+ OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
+ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
+ OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+================================================================================
+ End of file
+================================================================================
