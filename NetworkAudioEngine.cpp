@@ -76,6 +76,7 @@ extern "C" {
 #define ESD_STREAM 0x0000
 #define ESD_PLAY   0x1000
 #define ESD_NAME_LEN 128 
+#define ESD_KEY_LEN 16
 
 #define SAMPLE_RATE         44100
 #define BLOCK_SIZE          256
@@ -345,6 +346,9 @@ void NetworkAudioEngine::tcpSendThread (void) {
     int error;
     struct iovec iovec[6];
     struct uio uio;
+    uint64_t connect_time = 0;
+    uint64_t last_connect = 0;
+    AbsoluteTime t;
     AbsoluteTime ticks = {0,0};
     AbsoluteTime ticks_per_block;
     char key [] = "abababababababab";
@@ -354,6 +358,11 @@ void NetworkAudioEngine::tcpSendThread (void) {
     int format = ESD_BITS16 | ESD_STEREO | ESD_STREAM | ESD_PLAY;
     int rate = SAMPLE_RATE;
     char name[ESD_NAME_LEN];
+
+    strcpy (name, "mac");
+    uio.uio_procp = NULL;
+    uio.uio_segflg = UIO_SYSSPACE;
+    uio.uio_rw = UIO_WRITE;
 
     IOLog ("TCP Send thread started\n");
     IOLockLock(lock);
@@ -369,53 +378,56 @@ void NetworkAudioEngine::tcpSendThread (void) {
         if (sock == NULL) {
             IOLog ("Connecting to esound server...\n");
 
-            error = socreate (AF_INET, &sock, SOCK_STREAM, IPPROTO_TCP);
-            if (error) {
-                IOLog ("socreate failed!\n");
-            } else {
-                // Connect to the esound daemon
-                error = soconnect (sock, (struct sockaddr*) &sockaddr);
+            clock_get_uptime(&t);
+            absolutetime_to_nanoseconds(t, &connect_time);   
+
+            if (connect_time - last_connect > (uint64_t)2000000000) {
+                last_connect = connect_time;
+
+                error = socreate (AF_INET, &sock, SOCK_STREAM, IPPROTO_TCP);
                 if (error) {
-                    IOLog ("socconnect returned %d\n", error);
-                    soclose (sock);
-                    sock = NULL;
+                    IOLog ("socreate failed!\n");
                 } else {
-                    // Prepare an ESD header: key, endian, proto, format, rate, name
-
-                    strcpy (name, "mac");
-                    iovec[0].iov_base = (char*) key;
-                    iovec[0].iov_len = strlen (key);
-                    iovec[1].iov_base = (char*) &endian;
-                    iovec[1].iov_len = sizeof (endian);
-                    iovec[2].iov_base = (char*) &proto;
-                    iovec[2].iov_len = sizeof (proto);
-                    iovec[3].iov_base = (char*) &format;
-                    iovec[3].iov_len = sizeof (format);
-                    iovec[4].iov_base = (char*) &rate;
-                    iovec[4].iov_len = sizeof (rate);
-                    iovec[5].iov_base = (char*) name;
-                    iovec[5].iov_len = ESD_NAME_LEN;
-
-                    uio.uio_iov = iovec;
-                    uio.uio_iovcnt = 6;
-                    uio.uio_offset = 0;
-                    uio.uio_resid = 0;
-                    for (int i = 0 ; i < uio.uio_iovcnt ; i++) {
-                        uio.uio_resid += iovec[i].iov_len;
-                    }
-                    uio.uio_segflg = UIO_SYSSPACE;
-                    uio.uio_rw = UIO_WRITE;
-                    uio.uio_procp = NULL;
-
-                    // Wait for the socket to settle down after creation
-                    sbwait((sockbuf*)&(sock->so_snd));
-
-                    // Send the ESD header
-                    error = sosend (sock, NULL, &uio, NULL, NULL, 0);
+                    // Connect to the esound daemon
+                    error = soconnect (sock, (struct sockaddr*) &sockaddr);
                     if (error) {
-                        IOLog ("sosend (header) returned %d\n", error);
+                        IOLog ("socconnect returned %d\n", error);
                         soclose (sock);
                         sock = NULL;
+                    } else {
+                        // Prepare an ESD header: key, endian, proto, format, rate, name
+
+                        iovec[0].iov_base = (char*) key;
+                        iovec[0].iov_len = ESD_KEY_LEN;
+                        iovec[1].iov_base = (char*) &endian;
+                        iovec[1].iov_len = sizeof (endian);
+                        iovec[2].iov_base = (char*) &proto;
+                        iovec[2].iov_len = sizeof (proto);
+                        iovec[3].iov_base = (char*) &format;
+                        iovec[3].iov_len = sizeof (format);
+                        iovec[4].iov_base = (char*) &rate;
+                        iovec[4].iov_len = sizeof (rate);
+                        iovec[5].iov_base = (char*) name;
+                        iovec[5].iov_len = ESD_NAME_LEN;
+
+                        uio.uio_iov = iovec;
+                        uio.uio_iovcnt = 6;
+                        uio.uio_offset = 0;
+                        uio.uio_resid = 0;
+                        for (int i = 0 ; i < uio.uio_iovcnt ; i++) {
+                            uio.uio_resid += iovec[i].iov_len;
+                        }
+
+                        // Wait for the socket to settle down after creation
+                        sbwait((sockbuf*)&(sock->so_snd));
+
+                        // Send the ESD header
+                        error = sosend (sock, NULL, &uio, NULL, NULL, 0);
+                        if (error) {
+                            IOLog ("sosend (header) returned %d\n", error);
+                            soclose (sock);
+                            sock = NULL;
+                        }
                     }
                 }
             }
@@ -428,12 +440,9 @@ void NetworkAudioEngine::tcpSendThread (void) {
                 + (currentBlock * BLOCK_BYTES);
             iovec[0].iov_len = BLOCK_BYTES;
             uio.uio_iov = iovec;
-            uio.uio_resid = iovec[0].iov_len;
+            uio.uio_resid = BLOCK_BYTES;
             uio.uio_iovcnt = 1;
             uio.uio_offset = 0;
-            uio.uio_segflg = UIO_SYSSPACE;
-            uio.uio_rw = UIO_WRITE;
-            uio.uio_procp = NULL;
 
             error = sosend (sock, NULL, &uio, NULL, NULL, 0);
             if (error) {
